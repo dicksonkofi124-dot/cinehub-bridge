@@ -11,6 +11,8 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
     "input": "^1.0.1",
     "telegram": "^2.26.22"
   }
