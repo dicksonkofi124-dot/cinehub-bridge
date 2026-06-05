@@ -50,6 +50,11 @@ app.get('/', (req, res) => {
     });
 });
 
+// Keep-alive ping endpoint
+app.get('/ping', (req, res) => {
+    res.json({ ok: true, time: new Date().toISOString() });
+});
+
 // List movies
 app.get('/movies', (req, res) => {
     res.json({
