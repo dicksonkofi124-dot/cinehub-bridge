@@ -9,22 +9,26 @@ const { StringSession } = require('telegram/sessions');
 const { Api } = require('telegram');
 const express = require('express');
 const cors = require('cors');
+const bodyParser = require('body-parser');
 
 const app = express();
 app.use(cors());
+app.use(bodyParser.json());
 
 const API_ID      = parseInt(process.env.TELEGRAM_API_ID || '30876082');
 const API_HASH    = process.env.TELEGRAM_API_HASH || '5c98a0330c3ee4c0b337fece870cd953';
 const SESSION_STR = process.env.TELEGRAM_SESSION || '';
 const PORT        = parseInt(process.env.PORT || '3000');
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'secure-admin-token';
 
 // Movie registry — message ID in Saved Messages
-const MOVIES = {
+let MOVIES = {
     'the-boys-s5e8' : 422,
     'the-rip-2026'  : 420,
-    // Add more here as you upload:
-    // 'movie-key': MESSAGE_ID,
 };
+
+// Traffic analytics
+let requestLogs = [];
 
 let client = null;
 
@@ -41,6 +45,22 @@ async function getClient() {
     return client;
 }
 
+// Middleware for tracking traffic
+app.use((req, res, next) => {
+    const logEntry = {
+        method: req.method,
+        path: req.path,
+        timestamp: new Date().toISOString(),
+    };
+    requestLogs.push(logEntry);
+
+    // Limit logs to the last 1000 requests to avoid memory issues
+    if (requestLogs.length > 1000) {
+        requestLogs.shift();
+    }
+    next();
+});
+
 // Health check
 app.get('/', (req, res) => {
     res.json({
@@ -53,6 +73,48 @@ app.get('/', (req, res) => {
 // Keep-alive ping endpoint
 app.get('/ping', (req, res) => {
     res.json({ ok: true, time: new Date().toISOString() });
+});
+
+// Admin panel - Add movie
+app.post('/admin/movies', (req, res) => {
+    const token = req.headers['authorization'];
+    if (token !== `Bearer ${ADMIN_TOKEN}`) {
+        return res.status(403).json({ ok: false, error: 'Unauthorized access' });
+    }
+
+    const { key, messageId } = req.body;
+    if (!key || !messageId) {
+        return res.status(400).json({ ok: false, error: 'Missing key or messageId' });
+    }
+
+    MOVIES[key] = messageId;
+    res.json({ ok: true, message: `Movie "${key}" added successfully!` });
+});
+
+// Admin panel - List movies
+app.get('/admin/movies', (req, res) => {
+    const token = req.headers['authorization'];
+    if (token !== `Bearer ${ADMIN_TOKEN}`) {
+        return res.status(403).json({ ok: false, error: 'Unauthorized access' });
+    }
+
+    res.json({
+        ok: true,
+        movies: Object.keys(MOVIES).map(key => ({ key, messageId: MOVIES[key] })),
+    });
+});
+
+// Admin panel - View traffic analytics
+app.get('/admin/analytics', (req, res) => {
+    const token = req.headers['authorization'];
+    if (token !== `Bearer ${ADMIN_TOKEN}`) {
+        return res.status(403).json({ ok: false, error: 'Unauthorized access' });
+    }
+
+    res.json({
+        ok: true,
+        logs: requestLogs,
+    });
 });
 
 // List movies
