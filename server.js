@@ -1,9 +1,3 @@
-/**
- * CineHub Telegram Bridge Server
- * Streams movie files directly from Telegram Saved Messages.
- * No file size limit — uses full MTProto client.
- */
-
 const { TelegramClient } = require('telegram');
 const { StringSession } = require('telegram/sessions');
 const { Api } = require('telegram');
@@ -19,10 +13,12 @@ const SESSION_STR = process.env.TELEGRAM_SESSION || '';
 const PORT        = parseInt(process.env.PORT || '3000');
 
 // Movie registry — message ID in Saved Messages
+// To add a new movie: upload via TDrive, get ID from generate-session.js, add here
 const MOVIES = {
     'the-boys-s5e8' : 422,
     'the-rip-2026'  : 420,
-    // Add more here as you upload:
+    'in-the-grey'   : 478,
+    // Add more below as you upload them:
     // 'movie-key': MESSAGE_ID,
 };
 
@@ -50,7 +46,7 @@ app.get('/', (req, res) => {
     });
 });
 
-// Keep-alive ping endpoint
+// Keep-alive ping
 app.get('/ping', (req, res) => {
     res.json({ ok: true, time: new Date().toISOString() });
 });
@@ -78,7 +74,6 @@ app.get('/download/:key', async (req, res) => {
     try {
         const tg = await getClient();
 
-        // Fetch message from Saved Messages
         const result = await tg.invoke(new Api.messages.GetMessages({
             id: [new Api.InputMessageID({ id: messageId })],
         }));
@@ -96,14 +91,12 @@ app.get('/download/:key', async (req, res) => {
 
         console.log(`[Stream] ${fileName} — ${(fileSize / 1024 / 1024).toFixed(1)} MB`);
 
-        // Set headers
         res.setHeader('Content-Type', mimeType);
         res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
         res.setHeader('Content-Length', fileSize);
         res.setHeader('Accept-Ranges', 'none');
         res.status(200);
 
-        // Stream in chunks — no BigInt offset to avoid .mod() bug
         const iter = tg.iterDownload({
             file: new Api.InputDocumentFileLocation({
                 id            : doc.id,
@@ -111,7 +104,7 @@ app.get('/download/:key', async (req, res) => {
                 fileReference : doc.fileReference,
                 thumbSize     : '',
             }),
-            requestSize: 512 * 1024, // 512KB chunks
+            requestSize: 512 * 1024,
         });
 
         for await (const chunk of iter) {
@@ -130,7 +123,6 @@ app.get('/download/:key', async (req, res) => {
     }
 });
 
-// Start server
 app.listen(PORT, async () => {
     console.log(`CineHub Bridge running on port ${PORT}`);
     if (SESSION_STR) {
