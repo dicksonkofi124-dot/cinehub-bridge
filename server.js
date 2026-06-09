@@ -17,7 +17,8 @@ const PORT        = parseInt(process.env.PORT || '3000');
 const MOVIES = {
     'the-boys-s5e8' : 422,
     'the-rip-2026'  : 420,
-    'in-the-grey'   : 478,
+    'in-the-grey'       : 478,
+    'gran-turismo-2023'  : 479,
     // Add more below as you upload them:
     // 'movie-key': MESSAGE_ID,
 };
