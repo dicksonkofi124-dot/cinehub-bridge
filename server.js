@@ -19,6 +19,7 @@ const MOVIES = {
     'the-rip-2026'  : 420,
     'in-the-grey'       : 478,
     'gran-turismo-2023'  : 479,
+    'off-campus-s1e1'    : 2,     // Channel: 3506869277
     // Add more below as you upload them:
     // 'movie-key': MESSAGE_ID,
 };
@@ -63,30 +64,58 @@ app.get('/movies', (req, res) => {
     });
 });
 
-// Stream/download endpoint
+// Stream/download endpoint - supports:
+// /download/movie-key (from MOVIES registry)
+// /download/home/MESSAGE_ID (TDrive Saved Messages format)
+// /download/CHANNEL_ID/MESSAGE_ID (TDrive folder/channel format)
 app.get('/download/:key', async (req, res) => {
     const key = req.params.key;
-    const messageId = MOVIES[key];
+    let messageId = MOVIES[key];
+    let channelId = null;
+
+    // Check if this is a numeric channel ID (TDrive folder format)
+    if (!messageId && /^\d+$/.test(key)) {
+        channelId = key;
+        return res.status(400).json({ ok: false, error: 'Use /download/CHANNEL_ID/MESSAGE_ID format' });
+    }
 
     if (!messageId) {
-        return res.status(404).json({ ok: false, error: `Movie "${key}" not found.` });
+        return res.status(404).json({ ok: false, error: `Movie "${key}" not found. Add it to MOVIES registry in server.js` });
     }
 
     try {
         const tg = await getClient();
 
-        const result = await tg.invoke(new Api.messages.GetMessages({
-            id: [new Api.InputMessageID({ id: messageId })],
-        }));
+        let result;
+        if (channelId) {
+            // Get from channel (TDrive folder)
+            try {
+                const channel = await tg.getEntity(BigInt(channelId));
+                result = await tg.invoke(new Api.channels.GetMessages({
+                    channel: channel,
+                    id: [new Api.InputMessageID({ id: messageId })],
+                }));
+            } catch(e) {
+                // Fallback to GetMessages without entity
+                result = await tg.invoke(new Api.messages.GetMessages({
+                    id: [new Api.InputMessageID({ id: messageId })],
+                }));
+            }
+        } else {
+            // Get from Saved Messages
+            result = await tg.invoke(new Api.messages.GetMessages({
+                id: [new Api.InputMessageID({ id: messageId })],
+            }));
+        }
 
         const msg = result.messages?.[0];
         if (!msg?.media?.document) {
-            return res.status(404).json({ ok: false, error: 'File not found in Saved Messages.' });
+            return res.status(404).json({ ok: false, error: 'File not found.' });
         }
 
         const doc      = msg.media.document;
         const nameAttr = doc.attributes?.find(a => a.className === 'DocumentAttributeFilename');
-        const fileName = nameAttr?.fileName || `${key}.mkv`;
+        const fileName = nameAttr?.fileName || `file_${messageId}.mkv`;
         const mimeType = doc.mimeType || 'application/octet-stream';
         const fileSize = Number(doc.size);
 
@@ -122,7 +151,30 @@ app.get('/download/:key', async (req, res) => {
             res.status(500).json({ ok: false, error: err.message });
         }
     }
+}
+
+
+// TDrive format: /download/home/MESSAGE_ID (Saved Messages)
+app.get('/download/home/:messageId', async (req, res) => {
+    const messageId = parseInt(req.params.messageId);
+    if (isNaN(messageId)) return res.status(400).json({ ok: false, error: 'Invalid message ID' });
+    await streamFile(req, res, messageId, null);
 });
+
+// TDrive format: /download/CHANNEL_ID/MESSAGE_ID (folder channels)
+app.get('/download/:channelId/:messageId', async (req, res) => {
+    const channelId = req.params.channelId;
+    const messageId = parseInt(req.params.messageId);
+    if (isNaN(messageId)) return res.status(400).json({ ok: false, error: 'Invalid message ID' });
+    // For Saved Messages, channelId is 'home' or null
+    if (channelId === 'home') {
+        await streamFile(req, res, messageId, null);
+    } else {
+        await streamFile(req, res, messageId, channelId);
+    }
+});
+
+async function streamFile(req, res, messageId, channelId) {
 
 app.listen(PORT, async () => {
     console.log(`CineHub Bridge running on port ${PORT}`);
