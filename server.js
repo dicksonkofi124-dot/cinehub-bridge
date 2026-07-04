@@ -81,28 +81,76 @@ function resolveEntry(movieEntry) {
     return { messageId: movieEntry, channelId: null };
 }
 
+// ── RESOLVE A CHANNEL ID INTO AN ENTITY ───────────────────────────────────────
+// GramJS (like Telethon) can only turn a bare numeric ID into a usable entity
+// if it already has that peer cached with its access hash. If the client
+// hasn't personally "seen" this channel yet in the current session, it can't
+// tell a channel ID from a user ID and throws exactly the PeerUser error this
+// bridge was hitting on every request. Calling getDialogs() forces GramJS to
+// fetch and cache every peer the account has, including this channel — after
+// that, getEntity() works. This only works if the account is actually a
+// member of the channel; if it still fails after this, the account needs to
+// (re)join that channel/group on Telegram.
+const resolvedChannelCache = new Set();
+
+async function resolveChannel(tg, channelId) {
+    try {
+        return await tg.getEntity(BigInt(channelId));
+    } catch (err) {
+        if (resolvedChannelCache.has(channelId)) throw err; // already retried once, don't loop forever
+        console.warn(`[Telegram] Entity cache miss for channel ${channelId} — refreshing dialogs and retrying...`);
+        await tg.getDialogs({ limit: 300 });
+        resolvedChannelCache.add(channelId);
+        return await tg.getEntity(BigInt(channelId));
+    }
+}
+
+// ── SHARED: FETCH A MESSAGE'S DOCUMENT (no streaming) ─────────────────────────
+// Used by both the size-lookup endpoint and the actual stream endpoint, so
+// there's only one place that talks to Telegram for "what is this file".
+async function fetchDocument(tg, messageId, channelId) {
+    let result;
+    if (channelId) {
+        const channel = await resolveChannel(tg, channelId);
+        result = await tg.invoke(new Api.channels.GetMessages({
+            channel : channel,
+            id      : [new Api.InputMessageID({ id: messageId })],
+        }));
+    } else {
+        result = await tg.invoke(new Api.messages.GetMessages({
+            id: [new Api.InputMessageID({ id: messageId })],
+        }));
+    }
+
+    const msg = result.messages?.[0];
+    if (!msg?.media?.document) return null;
+
+    const doc      = msg.media.document;
+    const nameAttr = doc.attributes?.find(a => a.className === 'DocumentAttributeFilename');
+    const fileName = nameAttr?.fileName || `file_${messageId}.mkv`;
+    const mimeType = doc.mimeType || 'application/octet-stream';
+    const fileSize = Number(doc.size);
+
+    return { doc, fileName, mimeType, fileSize };
+}
+
+function humanSize(bytes) {
+    if (!bytes || isNaN(bytes)) return null;
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let i = 0, n = bytes;
+    while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+    return `${n.toFixed(n < 10 && i > 0 ? 1 : 0)} ${units[i]}`;
+}
+
 // ── SHARED STREAM FUNCTION ───────────────────────────────────────────────────
 // channelId = null   → stream from Saved Messages
 // channelId = string → stream from a [TD] channel
 async function streamFile(req, res, messageId, channelId) {
     try {
         const tg = await getClient();
-        let result;
+        const info = await fetchDocument(tg, messageId, channelId);
 
-        if (channelId) {
-            const channel = await tg.getEntity(BigInt(channelId));
-            result = await tg.invoke(new Api.channels.GetMessages({
-                channel : channel,
-                id      : [new Api.InputMessageID({ id: messageId })],
-            }));
-        } else {
-            result = await tg.invoke(new Api.messages.GetMessages({
-                id: [new Api.InputMessageID({ id: messageId })],
-            }));
-        }
-
-        const msg = result.messages?.[0];
-        if (!msg?.media?.document) {
+        if (!info) {
             return res.status(404).json({
                 ok: false,
                 error: channelId
@@ -111,11 +159,7 @@ async function streamFile(req, res, messageId, channelId) {
             });
         }
 
-        const doc      = msg.media.document;
-        const nameAttr = doc.attributes?.find(a => a.className === 'DocumentAttributeFilename');
-        const fileName = nameAttr?.fileName || `file_${messageId}.mkv`;
-        const mimeType = doc.mimeType || 'application/octet-stream';
-        const fileSize = Number(doc.size);
+        const { doc, fileName, mimeType, fileSize } = info;
 
         console.log(`[Stream] ${fileName} — ${(fileSize / 1024 / 1024).toFixed(1)} MB${channelId ? ` (channel ${channelId})` : ' (Saved Messages)'}`);
 
@@ -211,7 +255,7 @@ app.get('/channel/:channelId', async (req, res) => {
 
     try {
         const tg = await getClient();
-        const channel = await tg.getEntity(BigInt(channelId));
+        const channel = await resolveChannel(tg, channelId);
         const messages = await tg.getMessages(channel, { limit });
 
         const files = messages
@@ -233,6 +277,48 @@ app.get('/channel/:channelId', async (req, res) => {
         console.error('[Error]', err.message);
         res.status(500).json({ ok: false, error: err.message });
     }
+});
+
+// ── FILE SIZE LOOKUP (no streaming — just reads the message's metadata) ──────
+// Used by the admin panel to auto-fill file size when you add a link.
+async function sendSize(req, res, messageId, channelId) {
+    try {
+        const tg = await getClient();
+        const info = await fetchDocument(tg, messageId, channelId);
+        if (!info) {
+            return res.status(404).json({ ok: false, error: 'File not found for that message ID.' });
+        }
+        return res.json({
+            ok       : true,
+            fileName : info.fileName,
+            bytes    : info.fileSize,
+            size     : humanSize(info.fileSize),
+        });
+    } catch (err) {
+        console.error('[Error]', err.message);
+        res.status(500).json({ ok: false, error: err.message });
+    }
+}
+
+app.get('/filesize/:key', async (req, res) => {
+    const key = req.params.key;
+    const entry = resolveEntry(MOVIES[key]);
+    if (entry) return sendSize(req, res, entry.messageId, entry.channelId);
+    if (/^\d+$/.test(key)) return sendSize(req, res, parseInt(key, 10), null);
+    return res.status(404).json({ ok: false, error: `"${key}" not found in registry.` });
+});
+
+app.get('/filesize/home/:messageId', async (req, res) => {
+    const messageId = parseInt(req.params.messageId);
+    if (isNaN(messageId)) return res.status(400).json({ ok: false, error: 'Invalid message ID' });
+    await sendSize(req, res, messageId, null);
+});
+
+app.get('/filesize/:channelId/:messageId', async (req, res) => {
+    const channelId = req.params.channelId;
+    const messageId = parseInt(req.params.messageId);
+    if (isNaN(messageId)) return res.status(400).json({ ok: false, error: 'Invalid message ID' });
+    await sendSize(req, res, messageId, channelId === 'home' ? null : channelId);
 });
 
 // Registry key lookup — supports both Saved Messages (number) and
